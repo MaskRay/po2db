@@ -4,8 +4,8 @@ import Control.Applicative
 import Control.Exception hiding (try)
 import Control.Monad
 import Data.Attoparsec.Combinator
-import Data.Attoparsec.ByteString.Char8
-import qualified Data.ByteString.Char8 as B
+import Data.Attoparsec.Text
+import qualified Data.Text as T
 import Data.Lens.Common
 import Data.Lens.Template
 import Data.List
@@ -46,12 +46,12 @@ emptyMsg = Msg [] [] [] [] 0 0 0
 parseHash :: Parser (Msg -> Msg)
 parseHash = (char '#' >>) . (<|> comment) $ do
   char ','
-  flags <- sepBy (many1 (skipMany (char ' ') >> (letter_ascii <|> char '-'))) (char ',')
+  flags <- sepBy (many1 (skipMany (char ' ') >> (letter <|> char '-'))) (char ',')
   return $ (msgflag ^!%= (flags:)) . (nmsgflag ^!%= succ)
   where
     comment = id <$ many (notChar '\n')
 
-parseMsg :: Lens Msg [String] -> Lens Msg Int -> B.ByteString -> (Parser a) -> Parser (Msg -> Msg)
+parseMsg :: Lens Msg [String] -> Lens Msg Int -> T.Text -> (Parser a) -> Parser (Msg -> Msg)
 parseMsg l l_n t o = do
   string t
   option undefined o
@@ -69,7 +69,7 @@ parseMsgctxt = parseMsg msgctxt nmsgctxt "msgctxt" (pure ())
 parseHeader :: Parser (Head -> Head)
 parseHeader = foldl1' (.) <$> sepBy (try p0 <|> try p1 <|> try p2 <|> try p3 <|> p4) (string "\\n")
   where
-    pt0 :: Lens Head String -> Lens Head String -> B.ByteString -> Parser (Head -> Head)
+    pt0 :: Lens Head String -> Lens Head String -> T.Text -> Parser (Head -> Head)
     pt0 l l_e s = string s >> skipMany space >> many1 (notChar '<') >>= \t -> char '<' >> many1 (notChar '>') >>= \t_e -> return $ (l ^= rstrip t) . (l_e ^= t_e)
     p0 = pt0 translator translator_e "Last-Translator:"
     p1 = pt0 team team_e "Language-Team:"
@@ -86,7 +86,7 @@ parsePo = do
 --  unsafePerformIO (print v) `seq` return v
   if null $ v ^. msgstr
     then fail "found no header"
-    else case parse parseHeader . B.pack . head $ v^.msgstr of
+    else case parse parseHeader . T.pack . head $ v^.msgstr of
     Fail _ pos err -> fail $ concat pos ++ err
     Partial _ -> fail $ show "placeholder"
     Done _ fh -> return (fh emptyHead, v)
@@ -124,7 +124,7 @@ main = do
     
     forM_ (poFiles options) $ \f ->
       handle (\(SomeException e) -> hPutStrLn stderr (show e)) $ do
-      contents <- do { h <- openFile f ReadMode; hSetEncoding h utf8; B.hGetContents h }
+      contents <- do { h <- openFile f ReadMode; hSetEncoding h utf8; T.pack <$> hGetContents h }
       
       let run header body = do
           execute stmtH $ map SqlString [f, header^.translator, header^.translator_e, header^.team, header^.team_e, header^.charset, header^.plural]
