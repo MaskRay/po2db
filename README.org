@@ -1,0 +1,58 @@
+* po2db
+
+* Building
+
+** Dependencies
+
+- emerge ghc cabal (root privilege required)
+- cabal update
+- cabal install split cmdargs data-lens-template HDBC-sqlite3
+
+*emerge* is Gentoo-specific package manager which should be replaced by yours.
+
+** po2db
+
+- git clone https://github.com/MaskRay/po2db
+- cd po2db
+- make
+
+* Usage
+
+#+begin_example
+% ./po2db -?
+The po2db program
+
+po2db [OPTIONS] DB [PO1, ...]
+  Extract infomation from PO1, ... and insert into DB
+
+Common flags:
+  -t --tablename=TABLE_NAME
+  -? --help                  Display help message
+  -V --version               Print version information
+
+Table h_$(tableName) will be created to record (pof(PO filename) TEXT,
+lname(translator name) TEXT, lmail(translator's email) TEXT, tname(team name)
+TEXT, tmail(team's email) TEXT, charset TEXT, pforms(plural forms) TEXT).
+Table t_$(tableName) will be created to record (id INTEGER, msgid TEXT, msgstr
+TEXT, msgctxt TEXT, fuzzy(has fuzzy flag) bool, flag(other flags) TEXT, pof(PO
+filename) TEXT).
+If table t_$(tableName) already exists, it will be rename to
+t_$(tableName)_$(number).
+#+end_example
+
+** Examples
+
+#+begin_example
+./po2db -t=table_name a.sqlite a.po
+#+end_example
+The equal sign between /-t/ and /table_name/ is mandatory.
+
+#+begin_example
+./po2db a.sqlite a.po another.po yet_another.po
+#+end_example
+Given no table name, it defaults to the empty string /""/ .
+
+#+begin_example
+./po2db -t=table_name a.sqlite a.po /dev/tty b.po
+#+end_example
+/dev/tty is read as if it is a PO file.When stdin is associated with a terminal, /dev/tty will be read as if it is a PO file.
