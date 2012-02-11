@@ -55,4 +55,4 @@ Given no table name, it defaults to the empty string /""/ .
 #+begin_example
 ./po2db -t=table_name a.sqlite a.po /dev/tty b.po
 #+end_example
-/dev/tty is read as if it is a PO file.When stdin is associated with a terminal, /dev/tty will be read as if it is a PO file.
+/dev/tty is read as if it is a PO file.
