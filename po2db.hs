@@ -30,36 +30,39 @@ data Head = Head { _translator :: String
 $(makeLenses [''Head])
 emptyHead = Head "" "" "" "" "" ""
 
-data Msg = Msg { _msgctxt :: [String]
-               , _msgid :: [String]
+data Msg = Msg { _msgid :: [String]
                , _msgstr :: [String]
+               , _msgctxt :: [String]
                , _msgflag :: [[String]]
+               , _nmsgid :: Int
+               , _nmsgctxt :: Int
+               , _nmsgflag :: Int
                } deriving (Show)
 $(makeLenses [''Msg])
-emptyMsg = Msg [] [] [] []
+emptyMsg = Msg [] [] [] [] 0 0 0
 
 parseHash :: CharParser st (Msg -> Msg)
 parseHash = between (char '#') newline $ (<|> comment) $ do
   char ','
   flags <- sepBy (many1 (skipMany (char ' ') >> (letter <|> char '-'))) (char ',')
-  return $ msgflag ^!%= (flags:)
+  return $ (msgflag ^!%= (flags:)) . (nmsgflag ^!%= succ)
   where
     comment = id <$ many (noneOf "\n")
 
-parseMsg :: Lens Msg [String] -> String -> (CharParser st a) -> CharParser st (Msg -> Msg)
-parseMsg l t o = do
+parseMsg :: Lens Msg [String] -> Lens Msg Int -> String -> (CharParser st a) -> CharParser st (Msg -> Msg)
+parseMsg l l_n t o = do
   string t
   optional o
   char ' '
   s <- (concat . concat) <$> many1 (char '"' *> many quotedChar <* char '"' <* newline)
-  optional . try $ parseMsg l t o
-  return $ l ^!%= (s:)
+  optional . try $ parseMsg l l_n t o
+  return $ (l ^!%= (s:)) . (l_n ^!%= (+1))
   where
     quotedChar = (:[]) <$> noneOf "\\\"" <|> try (char '\\' >> (\c -> ['\\',c]) <$> anyChar)
 
-parseMsgid = parseMsg msgid "msgid" (string "_plural")
-parseMsgstr = parseMsg msgstr "msgstr" (between (char '[') (char ']') digit)
-parseMsgctxt = parseMsg msgctxt "msgctxt" (string "")
+parseMsgid = parseMsg msgid nmsgid "msgid" (string "_plural")
+parseMsgstr = parseMsg msgstr (lens (const 0) (flip const)) "msgstr" (between (char '[') (char ']') digit)
+parseMsgctxt = parseMsg msgctxt nmsgctxt "msgctxt" (string "")
 
 parseHeader :: CharParser st (Head -> Head)
 parseHeader = foldl1' (.) <$> endBy1 (try p0 <|> try p1 <|> try p2 <|> try p3 <|> p4) (string "\\n")
@@ -77,7 +80,7 @@ parsePo :: CharParser st (Head, Msg)
 parsePo = do
   fs <- (map $ foldl1' (.)) <$> sepEndBy1 (many1 (try parseMsgid <|> try parseMsgstr <|> try parseMsgctxt <|> parseHash)) (skipMany1 newline)
   let v = foldl' merge emptyMsg (reverse fs)
---  unsafePerformIO (zipWithM (\a b -> putStrLn "" >> putStrLn a >> putStrLn b) (v^.msgid) (v^.msgstr)) `seq` return v
+--  unsafePerformIO (zipWithM (\a b -> putStrLn "" >> putStrLn a >> putStrLn b) (v^.msgid) (concat (v^.msgflag))) `seq` return v
   if null $ v ^. msgstr
     then fail "found no header"
     else case runParser parseHeader () "(head)" (head (v ^. msgstr)) of
@@ -88,8 +91,8 @@ parsePo = do
     merge acc g = p1 . p0 $ acc'
       where
         acc' = g acc
-        p0 = if length (acc^.msgid)+1 > length (acc'^.msgctxt) then msgctxt ^!%= ("":) else id
-        p1 = if length (acc^.msgid)+1 > length (acc'^.msgflag) then msgflag ^!%= ([]:) else id
+        p0 = if acc'^.nmsgid > acc'^.nmsgctxt then (msgctxt ^!%= ("":)) . (nmsgctxt ^!%= succ) else id
+        p1 = if acc'^.nmsgid > acc'^.nmsgflag then (msgflag ^!%= ([]:)) . (nmsgflag ^!%= succ) else id
 
 main = do
   options <- cmdArgs $ Po2db { dbFile = def &= argPos 0 &= typ "DB"
