@@ -1,15 +1,17 @@
-{-# LANGUAGE DeriveDataTypeable, TemplateHaskell #-}
+{-# LANGUAGE DeriveDataTypeable, OverloadedStrings, ScopedTypeVariables, TemplateHaskell #-}
 import Prelude hiding (catch)
-import Control.Applicative hiding (optional, many, (<|>))
+import Control.Applicative
 import Control.Exception hiding (try)
 import Control.Monad
+import Data.Attoparsec.Combinator
+import Data.Attoparsec.ByteString.Char8
+import qualified Data.ByteString.Char8 as B
 import Data.Lens.Common
 import Data.Lens.Template
 import Data.List
 import Data.Maybe
 import Database.HDBC
 import Database.HDBC.Sqlite3
-import Text.ParserCombinators.Parsec
 import Text.Printf
 import System.Console.CmdArgs
 import System.IO
@@ -41,51 +43,53 @@ data Msg = Msg { _msgid :: [String]
 $(makeLenses [''Msg])
 emptyMsg = Msg [] [] [] [] 0 0 0
 
-parseHash :: CharParser st (Msg -> Msg)
-parseHash = between (char '#') newline $ (<|> comment) $ do
+parseHash :: Parser (Msg -> Msg)
+parseHash = (char '#' >>) . (<|> comment) $ do
   char ','
-  flags <- sepBy (many1 (skipMany (char ' ') >> (letter <|> char '-'))) (char ',')
+  flags <- sepBy (many1 (skipMany (char ' ') >> (letter_ascii <|> char '-'))) (char ',')
   return $ (msgflag ^!%= (flags:)) . (nmsgflag ^!%= succ)
   where
-    comment = id <$ many (noneOf "\n")
+    comment = id <$ many (notChar '\n')
 
-parseMsg :: Lens Msg [String] -> Lens Msg Int -> String -> (CharParser st a) -> CharParser st (Msg -> Msg)
+parseMsg :: Lens Msg [String] -> Lens Msg Int -> B.ByteString -> (Parser a) -> Parser (Msg -> Msg)
 parseMsg l l_n t o = do
   string t
-  optional o
+  option undefined o
   char ' '
-  s <- (concat . concat) <$> many1 (char '"' *> many quotedChar <* char '"' <* newline)
-  optional . try $ parseMsg l l_n t o
+  s <- (concat . concat) <$> many1 (char '"' *> many quotedChar <* char '"' <* char '\n')
+  option undefined $ parseMsg l l_n t o
   return $ (l ^!%= (s:)) . (l_n ^!%= (+1))
   where
-    quotedChar = (:[]) <$> noneOf "\\\"" <|> try (char '\\' >> (\c -> ['\\',c]) <$> anyChar)
+    quotedChar = (:[]) <$> try (satisfy (\c -> c /= '\\' && c /= '"')) <|> (char '\\' >> (\c -> ['\\',c]) <$> anyChar)
 
 parseMsgid = parseMsg msgid nmsgid "msgid" (string "_plural")
-parseMsgstr = parseMsg msgstr (lens (const 0) (flip const)) "msgstr" (between (char '[') (char ']') digit)
-parseMsgctxt = parseMsg msgctxt nmsgctxt "msgctxt" (string "")
+parseMsgstr = parseMsg msgstr (lens (const 0) (flip const)) "msgstr" (char '[' *> digit <* char ']')
+parseMsgctxt = parseMsg msgctxt nmsgctxt "msgctxt" (pure ())
 
-parseHeader :: CharParser st (Head -> Head)
-parseHeader = foldl1' (.) <$> endBy1 (try p0 <|> try p1 <|> try p2 <|> try p3 <|> p4) (string "\\n")
+parseHeader :: Parser (Head -> Head)
+parseHeader = foldl1' (.) <$> sepBy (try p0 <|> try p1 <|> try p2 <|> try p3 <|> p4) (string "\\n")
   where
-    pt0 :: Lens Head String -> Lens Head String -> String -> CharParser st (Head -> Head)
-    pt0 l l_e s = string s >> spaces >> many1 (noneOf "<") >>= \t -> spaces >> between (char '<') (char '>') (many1 (noneOf ">")) >>= \t_e -> return $ (l ^= rstrip t) . (l_e ^= t_e)
+    pt0 :: Lens Head String -> Lens Head String -> B.ByteString -> Parser (Head -> Head)
+    pt0 l l_e s = string s >> skipMany space >> many1 (notChar '<') >>= \t -> char '<' >> many1 (notChar '>') >>= \t_e -> return $ (l ^= rstrip t) . (l_e ^= t_e)
     p0 = pt0 translator translator_e "Last-Translator:"
     p1 = pt0 team team_e "Language-Team:"
-    p2 = string "Content-Type: text/plain; charset=" >> (charset ^=) <$> many1 (noneOf "\\")
-    p3 = string "Plural-Forms: " >> (plural ^=) <$> many1 (noneOf "\\")
-    p4 = id <$ many1 (noneOf "\\")
+    p2 = string "Content-Type: text/plain; charset=" >> (charset ^=) <$> many1 (notChar '\\')
+    p3 = string "Plural-Forms: " >> (plural ^=) <$> many1 (notChar '\\')
+    p4 = id <$ many1 (notChar '\\')
     rstrip = reverse . dropWhile (==' ') . reverse
 
-parsePo :: CharParser st (Head, Msg)
+parsePo :: Parser (Head, Msg)
 parsePo = do
-  fs <- (map $ foldl1' (.)) <$> sepEndBy1 (many1 (try parseMsgid <|> try parseMsgstr <|> try parseMsgctxt <|> parseHash)) (skipMany1 newline)
+  fs <- (map $ foldl1' (.)) <$> sepBy (many1 (try parseMsgid <|> try parseMsgstr <|> try parseMsgctxt <|> parseHash)) (skipMany1 (char '\n'))
   let v = foldl' merge emptyMsg (reverse fs)
 --  unsafePerformIO (zipWithM (\a b -> putStrLn "" >> putStrLn a >> putStrLn b) (v^.msgid) (concat (v^.msgflag))) `seq` return v
+--  unsafePerformIO (print v) `seq` return v
   if null $ v ^. msgstr
     then fail "found no header"
-    else case runParser parseHeader () "(head)" (head (v ^. msgstr)) of
-    Left err -> fail $ show err
-    Right fh -> return (fh emptyHead, v)
+    else case parse parseHeader . B.pack . head $ v^.msgstr of
+    Fail _ pos err -> fail $ concat pos ++ err
+    Partial _ -> fail $ show "placeholder"
+    Done _ fh -> return (fh emptyHead, v)
   where
     merge :: Msg -> (Msg -> Msg) -> Msg
     merge acc g = p1 . p0 $ acc'
@@ -120,16 +124,22 @@ main = do
     
     forM_ (poFiles options) $ \f ->
       handle (\(SomeException e) -> hPutStrLn stderr (show e)) $ do
-      contents <- do { h <- openFile f ReadMode; hSetEncoding h utf8; hGetContents h }
-      case runParser parsePo () f contents of
-        Left err -> hPrint stderr err
-        Right (header, body) -> do
+      contents <- do { h <- openFile f ReadMode; hSetEncoding h utf8; B.hGetContents h }
+      
+      let run header body = do
           execute stmtH $ map SqlString [f, header^.translator, header^.translator_e, header^.team, header^.team_e, header^.charset, header^.plural]
           sequence_ $ zipWith5 (\i id_ str ctxt flag -> do
                                    let fuzzy = maybe "0" (const "1") $ find (=="fuzzy") flag
                                        flag' = delete "fuzzy" flag
                                    execute stmtT $ SqlInt64 i : map SqlString [id_, str, ctxt, fuzzy, intercalate "," flag', f]
                                ) [1..] (body^.msgid) (body^.msgstr) (body^.msgctxt) (body^.msgflag)
+      
+      case parse parsePo contents of
+        Fail _ pos err -> hPutStrLn stderr $ concat pos ++ err
+        Partial cont -> case cont "" of
+          Done _ (header, body) -> run header body
+        Done _ (header, body) -> run header body
+
 
     run conn (printf "CREATE INDEX '%s' on '%s' (pof,lname,lmail,tname,tmail,charset,pforms)" (if ntables > 0 then i_h++show (ntables-1) else i_h) h) []
     run conn (printf "CREATE INDEX '%s' on '%s' (id,msgid,msgstr,msgctxt,fuzzy,flag,pof)" (if ntables > 0 then i_t++show (ntables-1) else i_t) t) []
