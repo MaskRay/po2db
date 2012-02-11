@@ -128,10 +128,10 @@ main = do
       
       let run header body = do
           execute stmtH $ map SqlString [f, header^.translator, header^.translator_e, header^.team, header^.team_e, header^.charset, header^.plural]
-          sequence_ $ zipWith5 (\i id_ str ctxt flag -> do
+          executeMany stmtT $ zipWith5 (\i id_ str ctxt flag -> do
                                    let fuzzy = maybe "0" (const "1") $ find (=="fuzzy") flag
                                        flag' = delete "fuzzy" flag
-                                   execute stmtT $ SqlInt64 i : map SqlString [id_, str, ctxt, fuzzy, intercalate "," flag', f]
+                                   SqlInt64 i : map SqlString [id_, str, ctxt, fuzzy, intercalate "," flag', f]
                                ) [1..] (body^.msgid) (body^.msgstr) (body^.msgctxt) (body^.msgflag)
       
       case parse parsePo contents of
