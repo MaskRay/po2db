@@ -119,8 +119,8 @@ main = do
     stmtT <- prepare conn $ printf "INSERT INTO '%s' VALUES(?,?,?,?,?,?,?)" t
     
     forM_ (poFiles options) $ \f ->
-      handle (\(SomeException e) -> hPutStrLn stderr (show e)) $ do 
-      contents <- readFile f
+      handle (\(SomeException e) -> hPutStrLn stderr (show e)) $ do
+      contents <- do { h <- openFile f ReadMode; hSetEncoding h utf8; hGetContents h }
       case runParser parsePo () f contents of
         Left err -> hPrint stderr err
         Right (header, body) -> do
