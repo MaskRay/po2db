@@ -4,7 +4,7 @@
 
 ** Dependencies
 
-- emerge ghc cabal (root privilege required)
+- emerge ghc cabal-instal (root privilege required)
 - cabal update
 - cabal install split cmdargs data-lens-template HDBC-sqlite3
 
