@@ -4,12 +4,15 @@ import Control.Applicative
 import Control.Exception
 import Control.Monad
 import Data.Attoparsec.Combinator
-import Data.Attoparsec.Text
-import qualified Data.Text as T
+import Data.Attoparsec.ByteString
+import qualified Data.ByteString as B
+import Data.ByteString.UTF8 (toString)
+import Data.Char
 import Data.Lens.Common
 import Data.Lens.Template
 import Data.List
 import Data.Maybe
+import Data.Word
 import Database.HDBC
 import Database.HDBC.Sqlite3
 import Text.Printf
@@ -22,20 +25,20 @@ data Po2db = Po2db { dbFile :: FilePath
                    , tableName :: String
                    } deriving (Data, Typeable, Show, Eq)
 
-data Head = Head { _translator :: String
-                 , _translator_e :: String
-                 , _team :: String
-                 , _team_e :: String
-                 , _charset :: String
-                 , _plural :: String
+data Head = Head { _translator :: B.ByteString
+                 , _translator_e :: B.ByteString
+                 , _team :: B.ByteString
+                 , _team_e :: B.ByteString
+                 , _charset :: B.ByteString
+                 , _plural :: B.ByteString
                  } deriving (Show)
 $(makeLenses [''Head])
 emptyHead = Head "" "" "" "" "" ""
 
-data Msg = Msg { _msgid :: [String]
-               , _msgstr :: [String]
-               , _msgctxt :: [String]
-               , _msgflag :: [[String]]
+data Msg = Msg { _msgid :: [B.ByteString]
+               , _msgstr :: [B.ByteString]
+               , _msgctxt :: [B.ByteString]
+               , _msgflag :: [[B.ByteString]]
                , _nmsgid :: Int
                , _nmsgctxt :: Int
                , _nmsgflag :: Int
@@ -43,52 +46,64 @@ data Msg = Msg { _msgid :: [String]
 $(makeLenses [''Msg])
 emptyMsg = Msg [] [] [] [] 0 0 0
 
+ord' = fromIntegral . ord
+
 parseHash :: Parser (Msg -> Msg)
-parseHash = (char '#' >>) . (<|> comment) $ do
-  char ','
-  flags <- sepBy (many1 (skipMany (char ' ') >> satisfy (\c -> c /= ',' && c /= '\n'))) (char ',')
+parseHash = (word8 (ord' '#') >>) . (<|> comment) $ do
+  word8 (ord' ',')
+  skipWhile' ' '
+  flags <- sepBy (takeWhile1 (\c -> c /= ord' ',' && c /= ord' '\n')) (char8' ',' >> skipWhile' ' ')
   return $ (msgflag ^!%= (flags:)) . (nmsgflag ^!%= succ)
   where
-    comment = id <$ many (notChar '\n')
+    comment = id <$ many (notWord8 (ord' '\n'))
 
 parseMsg :: Parser (Msg -> Msg)
 parseMsg = do
   string "msg"
-  what <- many1 letter
-  option undefined $ (char '[' >> digit >> char ']')
-  char ' '
-  s <- (concat . concat) <$> sepBy1 (char '"' *> many quotedChar <* char '"') (char '\n')
+  what <- takeWhile1 (\c -> 96 <= c && c < 96+26)
+  option undefined $ char8' '[' >> anyWord8 >> char8' ']'
+  skipWhile' ' '
+  s <- B.concat <$> sepBy1 (char8' '"' *> scan False quotedChar <* char8' '"') (char8' '\n')
   case what of
     "id" -> return $ (msgid ^!%= (s:)) . (nmsgid ^!%= succ)
     "str" -> return $ msgstr ^!%= (s:)
     "ctxt" -> return $ (msgctxt ^!%= (s:)) . (nmsgctxt ^!%= succ)
     _ -> return id
   where
-    quotedChar = (:[]) <$> satisfy (\c -> c /= '\\' && c /= '"') <|> (char '\\' >> (\c -> ['\\',c]) <$> anyChar)
+    quotedChar s c
+      | s = Just False
+      | not s = if c == ord' '"' then Nothing
+                else Just $ c == ord' '\\'
+
+takeWhile1' cc = takeWhile1 (\c -> c == ord' cc)  
+takeUntil1 cc = takeWhile1 (\c -> c /= ord' cc)
+skipWhile' cc = skipWhile (\c -> c == ord' cc)
+skipUntil cc = skipWhile (\c -> c /= ord' cc)
+char8' = word8 . fromIntegral . ord
 
 parseHeader :: Parser (Head -> Head)
 parseHeader = foldl1' (.) <$> sepBy1 (p0 <|> p1 <|> p2 <|> p3 <|> p4) (string "\\n")
   where
-    pt0 :: Lens Head String -> Lens Head String -> T.Text -> Parser (Head -> Head)
-    pt0 l l_e s = string s >> skipMany space >> many1 (notChar '<') >>= \t -> char '<' >> many1 (notChar '>') >>= \t_e -> ((l ^= rstrip t) . (l_e ^= t_e)) <$ rest
+    pt0 :: Lens Head B.ByteString -> Lens Head B.ByteString -> B.ByteString -> Parser (Head -> Head)
+    pt0 l l_e s = string s >> takeUntil1 '<' >>= \t -> char8' '<' >> takeUntil1 '>' >>= \t_e -> ((l ^= rstrip t) . (l_e ^= t_e)) <$ rest
     p0 = pt0 translator translator_e "Last-Translator:"
     p1 = pt0 team team_e "Language-Team:"
     p2 = string "Content-Type: text/plain; charset=" >> (charset ^=) <$> rest
     p3 = string "Plural-Forms: " >> (plural ^=) <$> rest
     p4 = id <$ rest
-    rstrip = reverse . dropWhile (==' ') . reverse
-    rest = many1 $ notChar '\\'
+    rstrip = B.reverse . B.dropWhile (==(ord' ' ')) . B.reverse . B.dropWhile (==(ord' ' '))
+    rest = takeWhile1 (\c -> c /= ord' '\\')
 
 parsePo :: Parser (Head, Msg)
 parsePo = do
-  v' <- ($ emptyMsg) <$> foldl1' (flip (.)) <$> many1 (parseMsg <|> parseHash <|> blank <$ skipMany1 (char '\n'))
+  v' <- ($ emptyMsg) <$> foldl1' (flip (.)) <$> many1 (parseMsg <|> parseHash <|> blank <$ takeWhile1' '\n')
   let v = (msgid ^!%= reverse) . (msgstr ^!%= reverse) . (msgctxt ^!%= reverse) . (msgflag ^!%= reverse) $ v'
 --  unsafePerformIO (zipWithM (\a b -> putStrLn "" >> putStrLn a >> putStrLn b) (v^.msgid) (concat (v^.msgflag))) `seq` return fs
 --  unsafePerformIO (print v) `seq` return v
 --  unsafePerformIO (putStr $ head $ v^.msgstr) `seq` return v
   if null (v ^. msgstr)
     then fail "found no header"
-    else case parse parseHeader . T.pack . head $ v^.msgstr of
+    else case parse parseHeader . head $ v^.msgstr of
     Fail _ pos err -> fail $ concat pos ++ err
     Partial cont -> case cont "" of
       Done rest fh -> return (fh emptyHead, v)
@@ -102,9 +117,9 @@ parsePo = do
 
 main = do
   options <- cmdArgs $ Po2db { dbFile = def &= argPos 0 &= typ "DB"
-                           , poFiles = def &= args &= typ "PO1, ..."
-                           , tableName = def &= typ "TABLE_NAME"
-                           } &= help "Extract infomation from PO1, ... and insert into DB" &= details ["Table h_$(tableName) will be created to record (pof(PO filename) TEXT, lname(translator name) TEXT, lmail(translator's email) TEXT, tname(team name) TEXT, tmail(team's email) TEXT, charset TEXT, pforms(plural forms) TEXT).", "Table t_$(tableName) will be created to record (id INTEGER, msgid TEXT, msgstr TEXT, msgctxt TEXT, fuzzy(has fuzzy flag) bool, flag(other flags) TEXT, pof(PO filename) TEXT).", "If table t_$(tableName) already exists, it will be rename to t_$(tableName)_$(number)."]
+                             , poFiles = def &= args &= typ "PO1, ..."
+                             , tableName = def &= typ "TABLE_NAME"
+                             } &= help "Extract infomation from PO1, ... and insert into DB" &= details ["Table h_$(tableName) will be created to record (pof(PO filename) TEXT, lname(translator name) TEXT, lmail(translator's email) TEXT, tname(team name) TEXT, tmail(team's email) TEXT, charset TEXT, pforms(plural forms) TEXT).", "Table t_$(tableName) will be created to record (id INTEGER, msgid TEXT, msgstr TEXT, msgctxt TEXT, fuzzy(has fuzzy flag) bool, flag(other flags) TEXT, pof(PO filename) TEXT).", "If table t_$(tableName) already exists, it will be rename to t_$(tableName)_$(number)."]
   let [t, h, i_t, i_h] = map (++tableName options) ["t_", "h_", "i_t_", "i_h_"]
 
   conn <- connectSqlite3 $ dbFile options
@@ -126,14 +141,14 @@ main = do
     
     forM_ (poFiles options) $ \f ->
       handle (\(SomeException e) -> hPutStrLn stderr (show e)) $ do
-      contents <- do { h <- openFile f ReadMode; hSetEncoding h utf8; T.pack <$> hGetContents h }
+      contents <- B.readFile f
       
       let run header body = do
-          execute stmtH $ map SqlString [f, header^.translator, header^.translator_e, header^.team, header^.team_e, header^.charset, header^.plural]
+          execute stmtH $ SqlString f : map (SqlString . toString) [header^.translator, header^.translator_e, header^.team, header^.team_e, header^.charset, header^.plural]
           executeMany stmtT $ zipWith5 (\i id_ str ctxt flag -> do
                                    let fuzzy = maybe "0" (const "1") $ find (=="fuzzy") flag
                                        flag' = delete "fuzzy" flag
-                                   SqlInt64 i : map SqlString [id_, str, ctxt, fuzzy, intercalate "," flag', f]
+                                   SqlInt64 i : map (SqlString . toString) [id_, str, ctxt, fuzzy, B.intercalate "," flag'] ++ [SqlString f]
                                ) [1..] (body^.msgid) (body^.msgstr) (body^.msgctxt) (body^.msgflag)
       
       case parse parsePo contents of
