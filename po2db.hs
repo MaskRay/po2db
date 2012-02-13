@@ -6,7 +6,6 @@ import Control.Monad
 import Data.Attoparsec.Combinator
 import Data.Attoparsec.Text
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 import Data.Lens.Common
 import Data.Lens.Template
 import Data.List
@@ -52,21 +51,20 @@ parseHash = (char '#' >>) . (<|> comment) $ do
   where
     comment = id <$ many (notChar '\n')
 
-parseMsg :: Lens Msg [String] -> Lens Msg Int -> T.Text -> (Parser a) -> Parser (Msg -> Msg)
-parseMsg l l_n t o = do
-  string t
-  option undefined o
+parseMsg :: Parser (Msg -> Msg)
+parseMsg = do
+  string "msg"
+  what <- many1 letter
+  option undefined $ (char '[' >> digit >> char ']')
   char ' '
   s <- (concat . concat) <$> sepBy1 (char '"' *> many quotedChar <* char '"') (char '\n')
-  
-  option undefined $ char '\n' >> parseMsg l l_n t o
-  return $ (l ^!%= (s:)) . (l_n ^!%= (+1))
+  case what of
+    "id" -> return $ (msgid ^!%= (s:)) . (nmsgid ^!%= succ)
+    "str" -> return $ msgstr ^!%= (s:)
+    "ctxt" -> return $ (msgctxt ^!%= (s:)) . (nmsgctxt ^!%= succ)
+    _ -> return id
   where
     quotedChar = (:[]) <$> satisfy (\c -> c /= '\\' && c /= '"') <|> (char '\\' >> (\c -> ['\\',c]) <$> anyChar)
-
-parseMsgid = parseMsg msgid nmsgid "msgid" (string "_plural")
-parseMsgstr = parseMsg msgstr (lens (const 0) (flip const)) "msgstr" (char '[' >> digit >> char ']')
-parseMsgctxt = parseMsg msgctxt nmsgctxt "msgctxt" (pure ())
 
 parseHeader :: Parser (Head -> Head)
 parseHeader = foldl1' (.) <$> sepBy1 (p0 <|> p1 <|> p2 <|> p3 <|> p4) (string "\\n")
@@ -83,10 +81,11 @@ parseHeader = foldl1' (.) <$> sepBy1 (p0 <|> p1 <|> p2 <|> p3 <|> p4) (string "\
 
 parsePo :: Parser (Head, Msg)
 parsePo = do
-  v' <- ($ emptyMsg) <$> foldl1' (flip (.)) <$> many1 (parseMsgid <|> parseMsgstr <|> parseMsgctxt <|> parseHash <|> blank <$ skipMany1 (char '\n'))
+  v' <- ($ emptyMsg) <$> foldl1' (flip (.)) <$> many1 (parseMsg <|> parseHash <|> blank <$ skipMany1 (char '\n'))
   let v = (msgid ^!%= reverse) . (msgstr ^!%= reverse) . (msgctxt ^!%= reverse) . (msgflag ^!%= reverse) $ v'
 --  unsafePerformIO (zipWithM (\a b -> putStrLn "" >> putStrLn a >> putStrLn b) (v^.msgid) (concat (v^.msgflag))) `seq` return fs
 --  unsafePerformIO (print v) `seq` return v
+--  unsafePerformIO (putStr $ head $ v^.msgstr) `seq` return v
   if null (v ^. msgstr)
     then fail "found no header"
     else case parse parseHeader . T.pack . head $ v^.msgstr of
@@ -127,7 +126,7 @@ main = do
     
     forM_ (poFiles options) $ \f ->
       handle (\(SomeException e) -> hPutStrLn stderr (show e)) $ do
-      contents <- TIO.readFile f
+      contents <- do { h <- openFile f ReadMode; hSetEncoding h utf8; T.pack <$> hGetContents h }
       
       let run header body = do
           execute stmtH $ map SqlString [f, header^.translator, header^.translator_e, header^.team, header^.team_e, header^.charset, header^.plural]
