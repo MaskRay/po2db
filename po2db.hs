@@ -1,5 +1,4 @@
 {-# LANGUAGE DeriveDataTypeable, OverloadedStrings, ScopedTypeVariables, TemplateHaskell #-}
-import Prelude hiding (catch)
 import Control.Applicative
 import Control.Exception
 import Control.Monad
@@ -18,7 +17,6 @@ import Database.HDBC.Sqlite3
 import Text.Printf
 import System.Console.CmdArgs
 import System.IO
-import System.IO.Unsafe
 
 data Po2db = Po2db { dbFile :: FilePath
                    , poFiles :: [FilePath]
@@ -26,9 +24,9 @@ data Po2db = Po2db { dbFile :: FilePath
                    } deriving (Data, Typeable, Show, Eq)
 
 data Head = Head { _translator :: B.ByteString
-                 , _translator_e :: B.ByteString
+                 , _translatorE :: B.ByteString
                  , _team :: B.ByteString
-                 , _team_e :: B.ByteString
+                 , _teamE :: B.ByteString
                  , _charset :: B.ByteString
                  , _plural :: B.ByteString
                  } deriving (Show)
@@ -47,15 +45,19 @@ $(makeLenses [''Msg])
 emptyMsg = Msg [] [] [] [] 0 0 0
 
 ord' = fromIntegral . ord
+char8' = word8 . ord'
+takeWhile1' cc = takeWhile1 (\c -> c == ord' cc)  
+takeUntil1 cc = takeWhile1 (\c -> c /= ord' cc)
+skipWhile' cc = skipWhile (\c -> c == ord' cc)
+skipUntil cc = skipWhile (\c -> c /= ord' cc)
 
 parseHash :: Parser (Msg -> Msg)
-parseHash = (word8 (ord' '#') >>) . (<|> comment) $ do
-  word8 (ord' ',')
-  skipWhile' ' '
-  flags <- sepBy (takeWhile1 (\c -> c /= ord' ',' && c /= ord' '\n')) (char8' ',' >> skipWhile' ' ')
+parseHash = (char8' '#' >>) . (<* char8' '\n') . (<|> comment) $ do
+  char8' ','
+  flags <- sepBy (skipWhile' ' ' *> takeWhile1 (\c -> c /= ord' ',' && c /= ord' '\n') <* skipWhile' ' ') (char8' ',')
   return $ (msgflag ^!%= (flags:)) . (nmsgflag ^!%= succ)
   where
-    comment = id <$ many (notWord8 (ord' '\n'))
+    comment = id <$ skipUntil '\n'
 
 parseMsg :: Parser (Msg -> Msg)
 parseMsg = do
@@ -75,24 +77,18 @@ parseMsg = do
       | not s = if c == ord' '"' then Nothing
                 else Just $ c == ord' '\\'
 
-takeWhile1' cc = takeWhile1 (\c -> c == ord' cc)  
-takeUntil1 cc = takeWhile1 (\c -> c /= ord' cc)
-skipWhile' cc = skipWhile (\c -> c == ord' cc)
-skipUntil cc = skipWhile (\c -> c /= ord' cc)
-char8' = word8 . fromIntegral . ord
-
 parseHeader :: Parser (Head -> Head)
 parseHeader = foldl1' (.) <$> sepBy1 (p0 <|> p1 <|> p2 <|> p3 <|> p4) (string "\\n")
   where
     pt0 :: Lens Head B.ByteString -> Lens Head B.ByteString -> B.ByteString -> Parser (Head -> Head)
     pt0 l l_e s = string s >> takeUntil1 '<' >>= \t -> char8' '<' >> takeUntil1 '>' >>= \t_e -> ((l ^= rstrip t) . (l_e ^= t_e)) <$ rest
-    p0 = pt0 translator translator_e "Last-Translator:"
-    p1 = pt0 team team_e "Language-Team:"
+    p0 = pt0 translator translatorE "Last-Translator:"
+    p1 = pt0 team teamE "Language-Team:"
     p2 = string "Content-Type: text/plain; charset=" >> (charset ^=) <$> rest
     p3 = string "Plural-Forms: " >> (plural ^=) <$> rest
     p4 = id <$ rest
-    rstrip = B.reverse . B.dropWhile (==(ord' ' ')) . B.reverse . B.dropWhile (==(ord' ' '))
-    rest = takeWhile1 (\c -> c /= ord' '\\')
+    rstrip = B.reverse . B.dropWhile (==ord' ' ') . B.reverse . B.dropWhile (==ord' ' ')
+    rest = takeUntil1 '\\'
 
 parsePo :: Parser (Head, Msg)
 parsePo = do
@@ -140,11 +136,11 @@ main = do
     stmtT <- prepare conn $ printf "INSERT INTO '%s' VALUES(?,?,?,?,?,?,?)" t
     
     forM_ (poFiles options) $ \f ->
-      handle (\(SomeException e) -> hPutStrLn stderr (show e)) $ do
+      handle (\(SomeException e) -> hPrint stderr e) $ do
       contents <- B.readFile f
       
       let run header body = do
-          execute stmtH $ SqlString f : map (SqlString . toString) [header^.translator, header^.translator_e, header^.team, header^.team_e, header^.charset, header^.plural]
+          execute stmtH $ SqlString f : map (SqlString . toString) [header^.translator, header^.translatorE, header^.team, header^.teamE, header^.charset, header^.plural]
           executeMany stmtT $ zipWith5 (\i id_ str ctxt flag -> do
                                    let fuzzy = maybe "0" (const "1") $ find (=="fuzzy") flag
                                        flag' = delete "fuzzy" flag
@@ -156,7 +152,6 @@ main = do
         Partial cont -> case cont "" of
           Done _ (header, body) -> run header body
         Done rest (header, body) -> run header body
-
 
     run conn (printf "CREATE INDEX '%s' on '%s' (pof,lname,lmail,tname,tmail,charset,pforms)" (if ntables > 0 then i_h++show (ntables-1) else i_h) h) []
     run conn (printf "CREATE INDEX '%s' on '%s' (id,msgid,msgstr,msgctxt,fuzzy,flag,pof)" (if ntables > 0 then i_t++show (ntables-1) else i_t) t) []
