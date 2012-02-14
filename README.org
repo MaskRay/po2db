@@ -6,7 +6,7 @@
 
 - emerge ghc cabal-instal (root privilege required)
 - cabal update
-- cabal install split cmdargs data-lens-template HDBC-sqlite3
+- cabal install attoparsec split cmdargs data-lens-template HDBC-sqlite3
 
 *emerge* is Gentoo-specific package manager which should be replaced by yours.
 
