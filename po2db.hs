@@ -62,13 +62,13 @@ parseHash = (char8' '#' >>) . (<* char8' '\n') . (<|> comment) $ do
 parseMsg :: Parser (Msg -> Msg)
 parseMsg = do
   string "msg"
-  what <- takeWhile1 (\c -> 96 <= c && c < 96+26)
-  option undefined $ char8' '[' >> anyWord8 >> char8' ']'
+  what <- takeUntil1 ' '
   skipWhile' ' '
   s <- B.concat <$> sepBy1 (char8' '"' *> scan False quotedChar <* char8' '"') (char8' '\n')
   case what of
     "id" -> return $ (msgid ^!%= (s:)) . (nmsgid ^!%= succ)
     "str" -> return $ msgstr ^!%= (s:)
+    "str[0]" -> return $ msgstr ^!%= (s:)
     "ctxt" -> return $ (msgctxt ^!%= (s:)) . (nmsgctxt ^!%= succ)
     _ -> return id
   where
